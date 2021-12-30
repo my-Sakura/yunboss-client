@@ -3,9 +3,10 @@ package msgclient
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -15,17 +16,12 @@ import (
 )
 
 type Client struct {
-	Token           string
-	Config          *Config
-	QuitCh          chan *ServerQuitBody
-	HeartBeatCh     chan *ServerHeartBeatBody
-	LoginCh         chan *ServerLoginBody
-	ClientPushCh    chan *ClientReturnBody
-	ServerPushCh    chan *ServerPushBody
-	HeartBeatHttpCh chan interface{}
-	Trigger         chan struct{}
-	Done            chan struct{}
-	Conn            net.Conn
+	Token        string
+	Config       *Config
+	ClientPushCh chan *ClientReturnBody
+	ServerPushCh chan *ServerPushBody
+	Done         chan struct{}
+	Conn         net.Conn
 }
 
 type HttpHeartBeatBody []struct {
@@ -53,15 +49,10 @@ func New() *Client {
 	}
 
 	return &Client{
-		Config:          config,
-		Done:            make(chan struct{}),
-		QuitCh:          make(chan *ServerQuitBody),
-		HeartBeatCh:     make(chan *ServerHeartBeatBody),
-		LoginCh:         make(chan *ServerLoginBody),
-		ClientPushCh:    make(chan *ClientReturnBody),
-		ServerPushCh:    make(chan *ServerPushBody),
-		Trigger:         make(chan struct{}),
-		HeartBeatHttpCh: make(chan interface{}),
+		Config:       config,
+		Done:         make(chan struct{}),
+		ClientPushCh: make(chan *ClientReturnBody),
+		ServerPushCh: make(chan *ServerPushBody),
 	}
 }
 
@@ -80,6 +71,40 @@ func (c *Client) Start() error {
 func (c *Client) Handler(conn net.Conn) {
 	defer conn.Close()
 
+	for {
+		err := c.Login()
+		if err != nil {
+			panic(err)
+		}
+		var buf = make([]byte, 1024)
+		n, err := conn.Read(buf)
+		if err != nil {
+			if err == io.EOF {
+				if err = c.Login(); err != nil {
+					panic(err)
+				}
+			}
+			panic(err)
+		}
+		loginBody := &ServerLoginBody{}
+		if err = json.Unmarshal(buf[:n], loginBody); err != nil {
+			panic(err)
+		}
+		if loginBody.Status != http.StatusOK {
+			if loginBody.Status == http.StatusConflict {
+				log.Fatalf("Error login: %s", "repeated uid")
+			} else {
+				time.Sleep(time.Second * 10)
+				continue
+			}
+		} else {
+			c.Token = loginBody.Token
+			fmt.Println("loginBody", loginBody)
+			break
+		}
+	}
+
+	go c.HeartBeat()
 	go c.ReceiveMsg(conn)
 
 	for {
@@ -96,26 +121,12 @@ func (c *Client) Handler(conn net.Conn) {
 		}
 
 		switch readRequest.Type {
-		case "login":
-			loginBody := &ServerLoginBody{}
-			if err = json.Unmarshal(buf[:n], loginBody); err != nil {
-				panic(err)
-			}
-			c.LoginCh <- loginBody
-
-		case "quit":
-			quitBody := &ServerQuitBody{}
-			if err = json.Unmarshal(buf[:n], quitBody); err != nil {
-				panic(err)
-			}
-			c.QuitCh <- quitBody
-
 		case "heartbeat":
 			heartBeatBody := &ServerHeartBeatBody{}
 			if err = json.Unmarshal(buf[:n], heartBeatBody); err != nil {
 				panic(err)
 			}
-			// c.HeartBeatCh <- heartBeatBody
+			fmt.Println(heartBeatBody, "heartBeatBody")
 
 		case "clientpush":
 			clientPush := &ClientReturnBody{}
@@ -169,13 +180,12 @@ func (c *Client) ReceiveMsg(conn net.Conn) {
 			}
 
 			url := c.Config.Boss + receiveData.URL
-			fmt.Println(url, "url")
 			reader := bytes.NewReader(reqBody)
 			request, err := http.NewRequest("POST", url, reader)
 			if err != nil {
 				serverReturnBody := &ServerReturnBody{
 					Type:   "serverpush",
-					Status: 1,
+					Status: 2,
 					Msg:    "url error",
 					Body:   "",
 				}
@@ -196,7 +206,7 @@ func (c *Client) ReceiveMsg(conn net.Conn) {
 				if strings.Contains(err.Error(), "Client.Timeout exceeded") {
 					serverReturnBody := &ServerReturnBody{
 						Type:   "serverpush",
-						Status: 1,
+						Status: 2,
 						Msg:    "request timeout",
 						Body:   "",
 					}
@@ -210,7 +220,21 @@ func (c *Client) ReceiveMsg(conn net.Conn) {
 					}
 					continue
 				}
-				panic(err)
+				serverReturnBody := &ServerReturnBody{
+					Type:   "serverpush",
+					Status: 2,
+					Msg:    "url error",
+					Body:   "",
+				}
+
+				d, err := json.Marshal(serverReturnBody)
+				if err != nil {
+					panic(err)
+				}
+				if _, err = c.Conn.Write(d); err != nil {
+					panic(err)
+				}
+				continue
 			}
 			defer resp.Body.Close()
 
@@ -219,16 +243,11 @@ func (c *Client) ReceiveMsg(conn net.Conn) {
 				panic(err)
 			}
 
-			var httpResp struct{ Body string }
-			if err = json.Unmarshal(respBody, &httpResp); err != nil {
-				panic(err)
-			}
-
 			serverReturnBody := &ServerReturnBody{
 				Type:   "serverpush",
 				Status: 0,
 				Msg:    "push succeed",
-				Body:   httpResp.Body,
+				Body:   string(respBody),
 			}
 
 			d, err := json.Marshal(serverReturnBody)
@@ -292,53 +311,6 @@ func (c *Client) HeartBeat() {
 				panic("[heartbeat] write error")
 			}
 
-		case <-c.Trigger:
-			httpHeartBeatBody := HttpHeartBeatBody{}
-			if c.Config.Monitor == "" {
-				c.HeartBeatHttpCh <- time.Now().Format("2006-01-02 15:04:05")
-				continue
-			}
-
-			request, err := http.NewRequest("GET", c.Config.Monitor, nil)
-			if err != nil {
-				panic(err)
-			}
-			request.Header.Set("Content-Type", "application/json")
-			client := http.Client{Timeout: time.Second * 3}
-			resp, err := client.Do(request)
-			if err != nil {
-				if strings.Contains(err.Error(), "Client.Timeout exceeded") {
-					fmt.Println("HTTP Post timeout")
-					c.HeartBeatHttpCh <- "overtime"
-				}
-				continue
-			}
-
-			defer resp.Body.Close()
-			body, err := ioutil.ReadAll(resp.Body)
-			if err != nil {
-				panic(err)
-			}
-
-			if err = json.Unmarshal(body, &httpHeartBeatBody); err != nil {
-				panic(err)
-			}
-
-			c.HeartBeatHttpCh <- httpHeartBeatBody
-			req := &ClientHeartBeatBody{
-				Type:  "heartbeat",
-				UID:   c.Config.Uid,
-				Token: c.Token,
-				Body:  httpHeartBeatBody,
-			}
-			data, err := json.Marshal(req)
-			if err != nil {
-				panic("[heartbeat] marshal error")
-			}
-			if _, err := c.Conn.Write(data); err != nil {
-				panic("[heartbeat] write error")
-			}
-
 		case <-c.Done:
 			return
 		}
@@ -358,23 +330,6 @@ func (c *Client) SendMsg(msg string) error {
 	}
 	if _, err = c.Conn.Write(body); err != nil {
 		return err
-	}
-
-	return nil
-}
-
-func (c *Client) Quit() error {
-	req := &ClientQuitBody{
-		Type:  "quit",
-		UID:   c.Config.Uid,
-		Token: c.Token,
-	}
-	data, err := json.Marshal(req)
-	if err != nil {
-		return errors.New("[quit] marshal error")
-	}
-	if _, err := c.Conn.Write(data); err != nil {
-		return errors.New("[quit] write error")
 	}
 
 	return nil

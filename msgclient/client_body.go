@@ -6,12 +6,6 @@ type ClientLoginBody struct {
 	Body string `json:"body"`
 }
 
-type ClientQuitBody struct {
-	Type  string `json:"type"`
-	UID   string `json:"uid"`
-	Token string `json:"token"`
-}
-
 type ClientHeartBeatBody struct {
 	Type  string            `json:"type"`
 	UID   string            `json:"uid"`
