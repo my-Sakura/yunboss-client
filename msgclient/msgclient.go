@@ -70,13 +70,18 @@ func (c *Client) Start() error {
 
 func (c *Client) Handler(conn net.Conn) {
 	defer conn.Close()
+	defer func() {
+		if err := recover(); err != nil {
+			log.Println(err)
+		}
+	}()
 
 	for {
 		err := c.Login()
 		if err != nil {
 			panic(err)
 		}
-		var buf = make([]byte, 1024)
+		var buf = make([]byte, 4096)
 		n, err := conn.Read(buf)
 		if err != nil {
 			if err == io.EOF {
