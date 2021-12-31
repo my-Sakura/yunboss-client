@@ -12,17 +12,16 @@ import (
 )
 
 var (
+	wsUpgrader = websocket.Upgrader{
+		ReadBufferSize:   4096,
+		WriteBufferSize:  4096,
+		HandshakeTimeout: 5 * time.Second,
+		CheckOrigin: func(r *http.Request) bool {
+			return true
+		},
+	}
 	ErrWebSocketClose = errors.New("websocket client close")
 )
-
-var wsUpgrader = websocket.Upgrader{
-	ReadBufferSize:   4096,
-	WriteBufferSize:  4096,
-	HandshakeTimeout: 5 * time.Second,
-	CheckOrigin: func(r *http.Request) bool {
-		return true
-	},
-}
 
 type Manager struct {
 	client *msgclient.Client

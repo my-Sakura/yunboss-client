@@ -161,6 +161,7 @@ func (c *Client) Handler(conn net.Conn) {
 		n, err := conn.Read(buf)
 		if err != nil {
 			if err == io.EOF {
+				fmt.Println("repeated login")
 				if err = c.Login(); err != nil {
 					panic(err)
 				}
