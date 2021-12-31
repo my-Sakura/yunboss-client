@@ -7,4 +7,6 @@ type Config struct {
 	Boss       string
 	LogPath    string `mapstructure:"log_path"`
 	Monitor    string
+	Apiport    string
+	Port       string
 }

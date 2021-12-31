@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -56,6 +57,80 @@ func New() *Client {
 	}
 }
 
+func (c *Client) cmd(port string) {
+	listener, err := net.Listen("tcp", ":"+port)
+	if err != nil {
+		log.Fatalf("Error listen: %s", err.Error())
+	}
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			log.Printf("Error accept client: %s", err.Error())
+			continue
+		}
+
+		go c.HandleCmd(conn)
+	}
+}
+
+func (c *Client) HandleCmd(conn net.Conn) {
+	defer conn.Close()
+	defer func() {
+		if err := recover(); err != nil {
+			log.Println(err)
+		}
+	}()
+
+	for {
+		var buf = make([]byte, 1024)
+		n, err := conn.Read(buf)
+		if err != nil {
+			if err == io.EOF {
+				return
+			}
+			panic(err)
+		}
+		var readRequest struct {
+			Type string `json:"type"`
+		}
+		if err = json.Unmarshal(buf[:n], &readRequest); err != nil {
+			panic(err)
+		}
+
+		switch readRequest.Type {
+		case "stop":
+			fmt.Println("process exit")
+			if _, err := conn.Write([]byte("msgclient exit")); err != nil {
+				panic(err)
+			}
+			os.Exit(0)
+
+		case "reload":
+			config := &Config{}
+			if err := viper.Unmarshal(config); err != nil {
+				panic(err)
+			}
+			c.Config = config
+			if _, err := conn.Write([]byte("reload succeed")); err != nil {
+				panic(err)
+			}
+
+			fmt.Println("config reload succeed")
+			return
+
+		case "status":
+			if _, err := conn.Write([]byte("msgclient running")); err != nil {
+				panic(err)
+			}
+			return
+
+		default:
+			fmt.Println("debug")
+		}
+	}
+}
+
 func (c *Client) Start() error {
 	conn, err := net.Dial("tcp", c.Config.Msgservice)
 	if err != nil {
@@ -63,7 +138,8 @@ func (c *Client) Start() error {
 	}
 	defer conn.Close()
 	c.Conn = conn
-	c.Handler(conn)
+	go c.Handler(conn)
+	c.cmd(c.Config.Port)
 
 	return nil
 }
@@ -148,7 +224,7 @@ func (c *Client) Handler(conn net.Conn) {
 			c.ServerPushCh <- serverPush
 
 		default:
-			fmt.Println("default-----------")
+			fmt.Println("debug")
 		}
 	}
 }

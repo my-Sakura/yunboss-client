@@ -8,8 +8,7 @@ import (
 )
 
 const (
-	_apiGroup   = ""
-	_clientAddr = "0.0.0.0:5000"
+	_apiGroup = ""
 )
 
 func init() {
@@ -28,7 +27,7 @@ var startCmd = &cobra.Command{
 		m.Regist(engine.Group(_apiGroup))
 
 		go client.Start()
-		if err := engine.Run(_clientAddr); err != nil {
+		if err := engine.Run(":" + client.Config.Apiport); err != nil {
 			return err
 		}
 

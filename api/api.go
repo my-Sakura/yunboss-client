@@ -1,12 +1,28 @@
 package api
 
 import (
+	"errors"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/my-Sakura/zinx/msgclient"
 )
+
+var (
+	ErrWebSocketClose = errors.New("websocket client close")
+)
+
+var wsUpgrader = websocket.Upgrader{
+	ReadBufferSize:   4096,
+	WriteBufferSize:  4096,
+	HandshakeTimeout: 5 * time.Second,
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
+}
 
 type Manager struct {
 	client *msgclient.Client
@@ -19,7 +35,82 @@ func New(client *msgclient.Client) *Manager {
 }
 
 func (m *Manager) Regist(r gin.IRouter) {
+	r.GET("/sendmsg/ws", m.wsSendMsg)
+
 	r.POST("/sendmsg", m.sendMsg)
+}
+
+func (m *Manager) wsSendMsg(c *gin.Context) {
+	wsConn, err := wsUpgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		log.Printf("Error upgrade  websocket: %v\n", err)
+		return
+	}
+	defer wsConn.Close()
+
+	var (
+		req struct {
+			Body string `json:"body"`
+		}
+		resp struct {
+			Status int    `json:"status"`
+			Msg    string `json:"msg"`
+		}
+	)
+
+	go func() {
+		for {
+			if err = wsConn.ReadJSON(&req); err != nil {
+				resp.Status = 1
+				resp.Msg = "please input json format data"
+
+				if websocket.ErrCloseSent.Error() == err.Error() {
+					log.Printf("%v\n", ErrWebSocketClose)
+					return
+				}
+				log.Printf("Error ws read: %v\n", err)
+				if err = wsConn.WriteJSON(resp); err != nil {
+					if websocket.ErrCloseSent.Error() == err.Error() {
+						log.Printf("%v\n", ErrWebSocketClose)
+						return
+					}
+					log.Printf("Error ws write: %v\n", err)
+					continue
+				}
+				continue
+			}
+
+			if err := m.client.SendMsg(req.Body); err != nil {
+				resp.Status = 1
+				resp.Msg = err.Error()
+				if err = wsConn.WriteJSON(resp); err != nil {
+					if websocket.ErrCloseSent.Error() == err.Error() {
+						log.Printf("%v\n", ErrWebSocketClose)
+						return
+					}
+					log.Printf("Error ws write: %v\n", err)
+					continue
+				}
+				log.Printf("Error sendMsg: %v\n", err)
+				continue
+			}
+		}
+	}()
+
+	for {
+		receiveData := <-m.client.ClientPushCh
+
+		resp.Status = 0
+		resp.Msg = receiveData.Body
+		if err = wsConn.WriteJSON(resp); err != nil {
+			if websocket.ErrCloseSent.Error() == err.Error() {
+				log.Printf("%v\n", ErrWebSocketClose)
+				return
+			}
+			log.Printf("Error ws write: %v\n", err)
+			continue
+		}
+	}
 }
 
 func (m *Manager) sendMsg(c *gin.Context) {
