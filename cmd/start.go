@@ -3,7 +3,7 @@ package cmd
 import (
 	"github.com/gin-gonic/gin"
 	"github.com/my-Sakura/zinx/api"
-	"github.com/my-Sakura/zinx/msgclient"
+	"github.com/my-Sakura/zinx/client"
 	"github.com/spf13/cobra"
 )
 
@@ -22,7 +22,7 @@ var startCmd = &cobra.Command{
 		engine := gin.Default()
 		engine.Use(api.Cors())
 
-		client := msgclient.New()
+		client := client.New()
 		m := api.New(client)
 		m.Regist(engine.Group(_apiGroup))
 

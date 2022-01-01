@@ -1,134 +1,50 @@
 package api
 
 import (
-	"errors"
 	"log"
 	"net/http"
-	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/gorilla/websocket"
-	"github.com/my-Sakura/zinx/msgclient"
-)
-
-var (
-	wsUpgrader = websocket.Upgrader{
-		ReadBufferSize:   4096,
-		WriteBufferSize:  4096,
-		HandshakeTimeout: 5 * time.Second,
-		CheckOrigin: func(r *http.Request) bool {
-			return true
-		},
-	}
-	ErrWebSocketClose = errors.New("websocket client close")
+	"github.com/my-Sakura/zinx/client"
 )
 
 type Manager struct {
-	client *msgclient.Client
+	client *client.Client
 }
 
-func New(client *msgclient.Client) *Manager {
+func New(client *client.Client) *Manager {
 	return &Manager{
 		client: client,
 	}
 }
 
 func (m *Manager) Regist(r gin.IRouter) {
-	r.GET("/sendmsg/ws", m.wsSendMsg)
-
 	r.POST("/sendmsg", m.sendMsg)
-}
-
-func (m *Manager) wsSendMsg(c *gin.Context) {
-	wsConn, err := wsUpgrader.Upgrade(c.Writer, c.Request, nil)
-	if err != nil {
-		log.Printf("Error upgrade  websocket: %v\n", err)
-		return
-	}
-	defer wsConn.Close()
-
-	var (
-		req struct {
-			Body string `json:"body"`
-		}
-		resp struct {
-			Status int    `json:"status"`
-			Msg    string `json:"msg"`
-		}
-	)
-
-	go func() {
-		for {
-			if err = wsConn.ReadJSON(&req); err != nil {
-				resp.Status = 1
-				resp.Msg = "please input json format data"
-
-				if websocket.ErrCloseSent.Error() == err.Error() {
-					log.Printf("%v\n", ErrWebSocketClose)
-					return
-				}
-				log.Printf("Error ws read: %v\n", err)
-				if err = wsConn.WriteJSON(resp); err != nil {
-					if websocket.ErrCloseSent.Error() == err.Error() {
-						log.Printf("%v\n", ErrWebSocketClose)
-						return
-					}
-					log.Printf("Error ws write: %v\n", err)
-					continue
-				}
-				continue
-			}
-
-			if err := m.client.SendMsg(req.Body); err != nil {
-				resp.Status = 1
-				resp.Msg = err.Error()
-				if err = wsConn.WriteJSON(resp); err != nil {
-					if websocket.ErrCloseSent.Error() == err.Error() {
-						log.Printf("%v\n", ErrWebSocketClose)
-						return
-					}
-					log.Printf("Error ws write: %v\n", err)
-					continue
-				}
-				log.Printf("Error sendMsg: %v\n", err)
-				continue
-			}
-		}
-	}()
-
-	for {
-		receiveData := <-m.client.ClientPushCh
-
-		resp.Status = 0
-		resp.Msg = receiveData.Body
-		if err = wsConn.WriteJSON(resp); err != nil {
-			if websocket.ErrCloseSent.Error() == err.Error() {
-				log.Printf("%v\n", ErrWebSocketClose)
-				return
-			}
-			log.Printf("Error ws write: %v\n", err)
-			continue
-		}
-	}
 }
 
 func (m *Manager) sendMsg(c *gin.Context) {
 	var req struct {
-		Body string `json:"body" binding:"required"`
+		Token string `json:"token" binding:"required"`
+		Body  string `json:"body" binding:"required"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "msg": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "msg": "bad request"})
 		log.Printf("Error bind request: %v\n", err)
 		return
 	}
 
+	if req.Token != m.client.Token {
+		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "msg": "please input the right token"})
+		log.Println("Error wrong token")
+		return
+	}
 	if err := m.client.SendMsg(req.Body); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "msg": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "msg": "internal error"})
 		log.Printf("Error sendMsg: %v\n", err)
 		return
 	}
-	receiveData := <-m.client.ClientPushCh
+	receiveData := <-m.client.ClientReturnCh
 
-	c.JSON(http.StatusOK, gin.H{"status": 0, "msg": receiveData.Body})
+	c.JSON(http.StatusOK, gin.H{"status": receiveData.Status, "msg": receiveData.Msg})
 }
