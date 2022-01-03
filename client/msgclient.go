@@ -6,51 +6,30 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"net"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 )
 
 type Client struct {
 	Token          string
 	Config         *Config
+	Log            *logrus.Logger
 	ClientReturnCh chan *ClientReturnBody
 	ServerPushCh   chan *ServerPushBody
 	Done           chan struct{}
 	Conn           net.Conn
 }
 
-type HttpHeartBeatBody []struct {
-	IP   string `json:"ip"`
-	UID  string `json:"uid"`
-	Body struct {
-		Process struct {
-			Nginx int `json:"nginx"`
-			Php   int `json:"php"`
-			Mysql int `json:"mysql"`
-		} `json:"process"`
-		HTTP struct {
-			Disk int `json:"disk"`
-		} `json:"http"`
-		Shell struct {
-			Network string `json:"network"`
-		} `json:"shell"`
-	} `json:"body"`
-}
-
-func New() *Client {
-	config := &Config{}
-	if err := viper.Unmarshal(config); err != nil {
-		panic(err)
-	}
-
+func New(config *Config, log *logrus.Logger) *Client {
 	return &Client{
 		Config:         config,
+		Log:            log,
 		Done:           make(chan struct{}),
 		ClientReturnCh: make(chan *ClientReturnBody),
 		ServerPushCh:   make(chan *ServerPushBody),
@@ -60,13 +39,18 @@ func New() *Client {
 func (c *Client) cmd(port string) {
 	listener, err := net.Listen("tcp", ":"+port)
 	if err != nil {
-		log.Fatalf("Error listen: %s", err.Error())
+		c.Log.WithFields(logrus.Fields{
+			"time": time.Now().Format("2006-01-02 15:04:05"),
+		}).Fatalf("Error listen: %s\n", err.Error())
 	}
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			log.Printf("Error accept client: %s", err.Error())
+			c.Log.WithFields(logrus.Fields{
+				"err":  err.Error(),
+				"time": time.Now().Format("2006-01-02 15:04:05"),
+			}).Errorln("Error accept client")
 			continue
 		}
 
@@ -78,7 +62,9 @@ func (c *Client) HandleCmd(conn net.Conn) {
 	defer conn.Close()
 	defer func() {
 		if err := recover(); err != nil {
-			log.Println(err)
+			c.Log.WithFields(logrus.Fields{
+				"time": time.Now().Format("2006-01-02 15:04:05"),
+			}).Errorln(err)
 		}
 	}()
 
@@ -116,7 +102,9 @@ func (c *Client) HandleCmd(conn net.Conn) {
 				panic(err)
 			}
 
-			fmt.Println("config reload succeed")
+			c.Log.WithFields(logrus.Fields{
+				"time": time.Now().Format("2006-01-02 15:04:05"),
+			}).Infoln("config reload succeed")
 			return
 
 		case "status":
@@ -126,7 +114,9 @@ func (c *Client) HandleCmd(conn net.Conn) {
 			return
 
 		default:
-			fmt.Println("debug")
+			c.Log.WithFields(logrus.Fields{
+				"time": time.Now().Format("2006-01-02 15:04:05"),
+			}).Infoln("debug")
 		}
 	}
 }
@@ -134,8 +124,12 @@ func (c *Client) HandleCmd(conn net.Conn) {
 func (c *Client) Start() error {
 	conn, err := net.Dial("tcp", c.Config.Msgservice)
 	if err != nil {
-		return err
+		c.Log.WithFields(logrus.Fields{
+			"err":  err,
+			"time": time.Now().Format("2006-01-02 15:04:05"),
+		}).Fatalln("connect server failed")
 	}
+	c.Log.Infof("time: %s      listen port: {http: %s}\n", time.Now().Format("2006-01-02 15:04:05"), c.Config.Apiport)
 	defer conn.Close()
 	c.Conn = conn
 	go c.Handler(conn)
@@ -148,7 +142,9 @@ func (c *Client) Handler(conn net.Conn) {
 	defer conn.Close()
 	defer func() {
 		if err := recover(); err != nil {
-			log.Println(err)
+			c.Log.WithFields(logrus.Fields{
+				"time": time.Now().Format("2006-01-02 15:04:05"),
+			}).Fatalln(err)
 		}
 	}()
 
@@ -161,7 +157,7 @@ func (c *Client) Handler(conn net.Conn) {
 		n, err := conn.Read(buf)
 		if err != nil {
 			if err == io.EOF {
-				fmt.Println("repeated login")
+				c.Log.Infof("time: %s      repeated login\n", time.Now().Format("2006-01-02 15:04:05"))
 				if err = c.Login(); err != nil {
 					panic(err)
 				}
@@ -172,16 +168,21 @@ func (c *Client) Handler(conn net.Conn) {
 		if err = json.Unmarshal(buf[:n], loginBody); err != nil {
 			panic(err)
 		}
+
+		c.Log.Infof("time: %s      login body: {type: %s, ip: %s, uid: %s, body: %s, status: %d, msg: %s, token: %s}\n",
+			time.Now().Format("2006-01-02 15:04:05"), loginBody.Type, loginBody.Ip, loginBody.UID, loginBody.Body,
+			loginBody.Status, loginBody.Msg, loginBody.Token)
 		if loginBody.Status != http.StatusOK {
 			if loginBody.Status == http.StatusConflict {
-				log.Fatalf("Error login: %s", "repeated uid")
+				c.Log.WithFields(logrus.Fields{
+					"time": time.Now().Format("2006-01-02 15:04:05"),
+				}).Fatalf("Error login: %s\n", "repeated uid")
 			} else {
 				time.Sleep(time.Second * 10)
 				continue
 			}
 		} else {
 			c.Token = loginBody.Token
-			fmt.Println("loginBody", loginBody)
 			break
 		}
 	}
@@ -208,13 +209,16 @@ func (c *Client) Handler(conn net.Conn) {
 			if err = json.Unmarshal(buf[:n], heartBeatBody); err != nil {
 				panic(err)
 			}
-			log.Printf("status: %s, msg: %s\n", heartBeatBody.Status, heartBeatBody.Msg)
+			c.Log.Infof("time: %s      heartbeat body: {status: %s, msg: %s}\n",
+				time.Now().Format("2006-01-02 15:04:05"), heartBeatBody.Status, heartBeatBody.Msg)
 
 		case "clientpush":
 			clientPush := &ClientReturnBody{}
 			if err = json.Unmarshal(buf[:n], clientPush); err != nil {
 				panic(err)
 			}
+			c.Log.Infof("time: %s      client push return body: {status: %s, msg: %s}\n",
+				time.Now().Format("2006-01-02 15:04:05"), clientPush.Status, clientPush.Msg)
 			c.ClientReturnCh <- clientPush
 
 		case "serverpush":
@@ -222,10 +226,14 @@ func (c *Client) Handler(conn net.Conn) {
 			if err = json.Unmarshal(buf[:n], serverPush); err != nil {
 				panic(err)
 			}
+			c.Log.Infof("time: %s      server push body: {uid: %s, body: %s, url: %s}\n",
+				time.Now().Format("2006-01-02 15:04:05"), serverPush.UID, serverPush.Body, serverPush.URL)
 			c.ServerPushCh <- serverPush
 
 		default:
-			fmt.Println("debug")
+			c.Log.WithFields(logrus.Fields{
+				"time": time.Now().Format("2006-01-02 15:04:05"),
+			}).Infoln("debug")
 		}
 	}
 }
@@ -349,7 +357,9 @@ func (c *Client) ReceiveMsg(conn net.Conn) {
 func (c *Client) HeartBeat() {
 	defer func() {
 		if err := recover(); err != nil {
-			log.Println(err)
+			c.Log.WithFields(logrus.Fields{
+				"time": time.Now().Format("2006-01-02 15:04:05"),
+			}).Fatalln(err)
 		}
 	}()
 	ticker := time.NewTicker(time.Second * time.Duration(c.Config.HeartBeat))
@@ -357,9 +367,10 @@ func (c *Client) HeartBeat() {
 	for {
 		select {
 		case <-ticker.C:
-			// httpHeartBeatBody := HttpHeartBeatBody{}
 			if c.Config.Monitor == "" {
-				fmt.Println(time.Now().Format("2006-01-02 15:04:05"))
+				c.Log.WithFields(logrus.Fields{
+					"time": time.Now().Format("2006-01-02 15:04:05"),
+				}).Errorln()
 				continue
 			}
 			monitor := "http://" + c.Config.Monitor + "/oservice/Heartbeat/index"
@@ -372,7 +383,9 @@ func (c *Client) HeartBeat() {
 			client := http.Client{Timeout: time.Second * 3}
 			resp, err := client.Do(request)
 			if err != nil {
-				fmt.Println("HTTP Post timeout")
+				c.Log.WithFields(logrus.Fields{
+					"time": time.Now().Format("2006-01-02 15:04:05"),
+				}).Errorln("HTTP Post timeout")
 				continue
 			}
 			defer resp.Body.Close()
@@ -380,10 +393,6 @@ func (c *Client) HeartBeat() {
 			if err != nil {
 				panic(err)
 			}
-
-			// if err = json.Unmarshal(body, &httpHeartBeatBody); err != nil {
-			// 	panic(err)
-			// }
 
 			req := &ClientHeartBeatBody{
 				Type:  "heartbeat",

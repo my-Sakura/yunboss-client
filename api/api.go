@@ -1,11 +1,12 @@
 package api
 
 import (
-	"log"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/my-Sakura/zinx/client"
+	"github.com/sirupsen/logrus"
 )
 
 type Manager struct {
@@ -30,18 +31,26 @@ func (m *Manager) sendMsg(c *gin.Context) {
 
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "msg": "bad request"})
-		log.Printf("Error bind request: %v\n", err)
+		m.client.Log.WithFields(logrus.Fields{
+			"err":  err,
+			"time": time.Now().Format("2006-01-02 15:04:05"),
+		}).Errorln("Error bind request")
 		return
 	}
 
 	if req.Token != m.client.Token {
 		c.JSON(http.StatusBadRequest, gin.H{"status": 1, "msg": "please input the right token"})
-		log.Println("Error wrong token")
+		m.client.Log.WithFields(logrus.Fields{
+			"time": time.Now().Format("2006-01-02 15:04:05"),
+		}).Errorln("Error wrong token")
 		return
 	}
 	if err := m.client.SendMsg(req.Body); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"status": 1, "msg": "internal error"})
-		log.Printf("Error sendMsg: %v\n", err)
+		m.client.Log.WithFields(logrus.Fields{
+			"err":  err,
+			"time": time.Now().Format("2006-01-02 15:04:05"),
+		}).Errorln("Error sendMsg")
 		return
 	}
 	receiveData := <-m.client.ClientReturnCh

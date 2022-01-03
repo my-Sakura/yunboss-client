@@ -9,7 +9,7 @@ log_path: ./
 #监控上报地址，调用ymonitor地址，用于心跳反馈问题
 monitor: 139.199.60.49:2180
 #心跳时间 s
-heartbeat: 30
+heartbeat: 1
 #api端口地址TCP端口
 apiport: 11883
 #命令sokect端口地址
